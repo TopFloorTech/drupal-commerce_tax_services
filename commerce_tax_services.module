@@ -1,0 +1,1337 @@
+<?php
+
+/**
+ * @file
+ * Calculate Sales Tax using TaxJar service
+ */
+
+define('COMMERCE_TAX_SERVICES_DEBUG', false);
+
+/**
+ * @return array
+ */
+function commerce_tax_services_info() {
+  $data = &drupal_static(__FUNCTION__);
+
+  if (!isset($data)) {
+    $data = module_invoke_all('tax_service_info');
+
+    $default = array(
+      'name' => 'Tax service',
+      'weight' => 0,
+      'module' => 'commerce_tax_services',
+      'line_item_data' => array(
+        'name' => 'tax_service',
+        'base' => 'tax_service',
+        'display_title' => 'Sales tax',
+        'description' => 'The calculated sales tax amount',
+        'price_component' => 'tax_service',
+        'weight' => 0,
+        'module' => 'commerce_tax_services',
+        'title' => 'Drupal Commerce Tax Services Connector',
+        'admin_list' => TRUE,
+      ),
+    );
+
+    foreach ($data as $service_id => $service_info) {
+      $data[$service_id] = $service_info + $default;
+    }
+  }
+
+  return $data;
+}
+
+function commerce_tax_services_service_info($id = null) {
+  if (empty($id)) {
+    $id = commerce_tax_services_current_service_id();
+  }
+
+  if (empty($id)) {
+    return FALSE;
+  }
+
+  $info = commerce_tax_services_info();
+
+  if (!array_key_exists($id, $info)) {
+    return FALSE;
+  }
+
+  return $info[$id];
+}
+
+function commerce_tax_services_current_service_id() {
+  // TODO: Get current service ID from variable
+  $service_id = 'taxjar';
+
+  return $service_id;
+}
+
+function commerce_tax_services_tax_service_name($service_id = null) {
+  $service_info = commerce_tax_services_service_info($service_id);
+
+  if (!$service_info) {
+    return FALSE;
+  }
+
+  return t($service_info['name']);
+}
+
+/**
+ * Implements hook_page_alter().
+ */
+function commerce_tax_services_page_alter() {
+  $path = current_path();
+  if (module_exists('commerce_tax') && strpos($path, 'admin/commerce/config/taxes') === 0) {
+    drupal_set_message(t('Please disable Commerce Tax module to avoid duplicate sales tax line items. Configure Commerce Tax Services !here.', array('!here' => l(t('here'), 'admin/commerce/config/tax-services'))));
+  }
+}
+
+/**
+ * Implements hook_permission().
+ */
+function commerce_tax_services_permission() {
+  return array(
+    'administer tax services' => array(
+      'title' => t('Administer Commerce Tax Services'),
+      'description' => t('Allows users to configure Commerce Tax Services'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_commerce_line_item_type_info().
+ */
+function commerce_tax_services_commerce_line_item_type_info() {
+  $line_item_types = array();
+
+  $service_name = commerce_tax_services_tax_service_name();
+
+  $line_item_types['tax_service'] = array(
+    'name' => t('Sales tax'),
+    'description' => t("Calculate $service_name"),
+    'add_form_submit_value' => t('Add Sales tax'),
+    'base' => 'commerce_tax_services_line_item',
+    'callbacks' => array(
+      'configuration' => 'commerce_tax_services_configure_line_item',
+    ),
+  );
+
+  return $line_item_types;
+}
+
+/**
+ * Line item callback: configures the TaxJar line item type on module enable.
+ */
+function commerce_tax_services_configure_line_item() {
+  $field_name = 'tax_service';
+  $type = 'tax_service';
+
+  $service_name = commerce_tax_services_tax_service_name();
+
+  $field = field_info_field($field_name);
+  $instance = field_info_instance('commerce_line_item', $field_name, $type);
+
+  if (empty($field)) {
+    $field = array(
+      'field_name' => $field_name,
+      'type' => 'list_text',
+      'cardinality' => 1,
+      'entity_types' => array('commerce_line_item'),
+      'translatable' => FALSE,
+      'locked' => TRUE,
+    );
+    field_create_field($field);
+  }
+
+  if (empty($instance)) {
+    $instance = array(
+      'field_name' => $field_name,
+      'entity_type' => 'commerce_line_item',
+      'bundle' => $type,
+      'label' => $service_name,
+      'required' => TRUE,
+      'settings' => array(),
+      'widget' => array(
+        'type' => 'options_select',
+        'weight' => 0,
+      ),
+      'display' => array(
+        'display' => array(
+          'label' => 'hidden',
+          'weight' => 0,
+        ),
+      ),
+    );
+    field_create_instance($instance);
+  }
+}
+
+/**
+ * Returns the title of a TaxJar line item.
+ * @param $line_item
+ * @return mixed
+ */
+function commerce_tax_services_line_item_title($line_item) {
+  if (!empty($line_item->data['tax_service']['display_title'])) {
+    return $line_item->data['tax_service']['display_title'];
+  }
+
+  return '';
+}
+
+/**
+ * Implements hook_commerce_price_component_type_info().
+ */
+function commerce_tax_services_commerce_price_component_type_info() {
+  // Get Sales Tax description.
+  $tax_title = (variable_get('commerce_tax_services_tax_description', ''));
+
+  $service_name = commerce_tax_services_tax_service_name();
+
+  $components = array();
+
+  // Define a generic TaxJar price component type.
+  $components['tax_service'] = array(
+    'title' => t("$service_name sales tax"),
+    'display_title' => $tax_title,
+    'weight' => 25,
+  );
+
+  return $components;
+}
+
+/**
+ * Calculate sales tax using regular web site checkout.
+ * @param $order
+ */
+function commerce_tax_services_calculate_sales_tax($order) {
+  if (!commerce_tax_services_check_address($order)) {
+    return;
+  }
+
+  $sales_tax = commerce_tax_services_retrieve_sales_tax($order);
+
+  // If we have a sales tax amount.
+  if (!$sales_tax) {
+    drupal_set_message(t('Tax Services did not calculate sales tax'), 'error');
+    return;
+  }
+
+  // Create a new Tax Services line item.
+  $line_item = commerce_tax_services_line_item_create($sales_tax, $order->order_id);
+  commerce_tax_services_add_tax_line_item($line_item, $order);
+
+  // Add the line item data as a property of the order.
+  $order->tax_service['tax_service'] = $line_item;
+}
+
+/**
+ * Calculate sales tax for manual order entry.
+ * @param $order
+ * @return bool
+ */
+function commerce_tax_services_manual_calculate_sales_tax($order) {
+  if (!commerce_tax_services_check_address($order)) {
+    drupal_set_message(t('TaxJar error: Invalid state or incomplete address'), 'error');
+    return false;
+
+  }
+
+  $sales_tax = commerce_tax_services_retrieve_sales_tax($order);
+
+  // If we have a sales tax amount.
+  if (!$sales_tax) {
+    drupal_set_message(t('Tax Services error: Sales tax could not be calculated'), 'error');
+    return false;
+  }
+
+  // Create a new TaxJar line item.
+  $line_item = commerce_tax_services_line_item_create($sales_tax, $order->order_id);
+
+  // Add the line item data as a property of the order.
+  $order->tax_service['tax_service'] = $line_item;
+
+  return true;
+}
+
+/**
+ * Creates a sales tax line item.
+ *
+ * @param array $sales_tax
+ *   A price array used to establish the base unit price for the TaxJar.
+ * @param int $order_id
+ *   If available, the order to which the TaxJar line item will belong.
+ *
+ * @return object
+ *   The sales tax line item.
+ */
+function commerce_tax_services_line_item_create($sales_tax = array(), $order_id = 0) {
+  $service_info = commerce_tax_services_service_info();
+  $price_component = $service_info ? $service_info['line_item_data']['price_component'] : 'tax_service';
+
+  $line_item = commerce_tax_services_line_item_new($sales_tax, $order_id);
+
+  // Set the price component of the unit price if it hasn't already been done.
+  $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+  $data = $line_item_wrapper->commerce_unit_price->data->value();
+
+  if (empty($data['components'])) {
+    $line_item_wrapper->commerce_unit_price->data = commerce_price_component_add(
+      $line_item_wrapper->commerce_unit_price->value(), $price_component, $line_item_wrapper->commerce_unit_price->value(), TRUE, FALSE
+    );
+  }
+
+  return $line_item;
+}
+
+/**
+ * Creates a new Tax service line item populated with the sales tax values.
+ *
+ * @param array $sales_tax
+ *   A price array used to initialize the value of the line item's unit price.
+ * @param int $order_id
+ *   The ID of the order the line item belongs to.
+ * @param array $data
+ *   An array value to initialize the line item's data array with.
+ * @param string $type
+ *   The name of the line item type being created; defaults to 'tax_service'.
+ *
+ * @return object
+ *   The taxjar line item initialized to the given
+ *   unit price.
+ */
+function commerce_tax_services_line_item_new($sales_tax = array(), $order_id = 0, $data = array(), $type = 'tax_service') {
+  // Ensure a default product line item type.
+  if (empty($type)) {
+    $type = 'tax_service';
+  }
+
+  // Create the new line item.
+  $line_item = entity_create('commerce_line_item', array(
+    'type' => $type,
+    'order_id' => $order_id,
+    'quantity' => 1,
+    'data' => $data,
+  ));
+
+  // Populate line item with the sales tax unit price data.
+  commerce_tax_services_line_item_populate($line_item, $sales_tax);
+
+  return $line_item;
+}
+
+/**
+ * Populates a sales tax line item with the specified values.
+ *
+ * @param $line_item
+ * @param array $sales_tax
+ *   A sales tax array to be added to the value of the line item's unit price.
+ */
+function commerce_tax_services_line_item_populate($line_item, $sales_tax = array()) {
+  $service_info = commerce_tax_services_service_info();
+
+  if (!$service_info) {
+    return;
+  }
+
+  // Use the label to store the display title of the taxjar service.
+  $line_item->line_item_label = $service_info['name'];
+  $line_item->quantity = 1;
+
+  $line_item->data['tax_service'] = $service_info['line_item_data'];
+
+  // Set the unit price.
+  $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+  $line_item_wrapper->commerce_unit_price = $sales_tax;
+}
+
+/**
+ * Adds a tax_service line item to an order, and saves the order.
+ *
+ * @param object $line_item
+ *   An unsaved taxjar line item that should be added to the order.
+ * @param object $order
+ *   The order to add the taxjar line item to.
+ */
+function commerce_tax_services_add_tax_line_item($line_item, $order) {
+  // Delete any existing TaxJar line items from the order.
+  commerce_tax_services_delete_tax_service_transaction($order);
+
+  // Save the incoming line item now so we get its ID.
+  commerce_line_item_save($line_item);
+
+  // Add it to the order's line item reference value.
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+  $order_wrapper->commerce_line_items[] = $line_item;
+
+  commerce_order_calculate_total($order);
+}
+
+/**
+ * Returns form for adding a tax_service line item through line item manager widget.
+ * @param $form
+ * @param $form_state
+ * @return array
+ */
+function commerce_tax_services_line_item_add_form($form, &$form_state) {
+  $form = array();
+
+  // Calculate the sales tax amount for this order.
+  if (isset($form_state['commerce_order']->order_id)) {
+    $order = commerce_order_load($form_state['commerce_order']->order_id);
+  } else {
+    $form['tax_service_error'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+
+    return $form;
+  }
+
+  $sales_tax_success = commerce_tax_services_manual_calculate_sales_tax($order);
+
+  // Return empty form with name to detect error.
+  if (!$sales_tax_success) {
+    $form['tax_service_error'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+
+    return $form;
+  }
+
+  // Store the available rates in the form.
+  $form['#attached']['css'][] = drupal_get_path('module', 'commerce_tax_services') . '/css/commerce_tax_services.admin.css';
+
+  $form['tax_service_rate'] = array(
+    '#type' => 'value',
+    '#value' => $order->tax_service,
+  );
+
+  // Create an options array for the sales tax amount.
+  $options = commerce_tax_services_options($order);
+
+  $service_name = commerce_tax_services_tax_service_name();
+
+  $form['tax_service'] = array(
+    '#type' => 'radios',
+    '#title' => $service_name,
+    '#options' => $options,
+    '#default_value' => key($options),
+  );
+
+  return $form;
+}
+
+/**
+ * Adds the selected Tax service information to a new Tax service line item.
+ *
+ * @param object $line_item
+ *   The newly created line item object.
+ * @param array $element
+ *   The array representing the widget form element.
+ */
+function commerce_tax_services_line_item_add_form_submit($line_item, $element = array()) {
+  // Ensure a quantity of 1.
+  $line_item->quantity = 1;
+
+  // Use the values for taxjar.
+  $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $element['actions']['tax_service_rate']['#value']['tax_service']);
+  $sales_tax = $line_item_wrapper->commerce_unit_price->value();
+
+  // Populate the line item with the appropriate data.
+  commerce_tax_services_line_item_populate($line_item, $sales_tax);
+}
+
+/**
+ * Turns the sales tax amount into a form element options array.
+ *
+ * @param object $order
+ *   An order object with an TaxJar property defined as an array of
+ *   sales tax values.
+ *
+ * @return array
+ *   An options array of calculated TaxJar rates labelled using the display
+ *   title of the TaxJar services.
+ */
+function commerce_tax_services_options($order) {
+  $options = array();
+
+  $line_item = $order->tax_service['tax_service'];
+  $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+
+  $service_name = commerce_tax_services_tax_service_name();
+
+  $options['tax_service'] = t('!tax_service: !price', array(
+    '!tax_service' => $service_name,
+    '!price' => commerce_currency_format($line_item_wrapper->commerce_unit_price->amount->value(), $line_item_wrapper->commerce_unit_price->currency_code->value()),
+  ));
+
+  return $options;
+}
+
+/**
+ * Deletes Tax service line items on an order.
+ *
+ * @param object $order
+ *   The order object to delete the TaxJar line items from.
+ */
+function commerce_tax_services_delete_tax_service_transaction($order) {
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+  // When deleting more than one line item, metadata_wrapper will give problems
+  // if deleting while looping through the line items. So first remove from
+  // order and then delete the line items.
+  $line_item_ids = array();
+
+  foreach ($order_wrapper->commerce_line_items as $delta => $line_item_wrapper) {
+    // If this line item is an taxjar line item...
+    if ($line_item_wrapper->type->value() == 'tax_service') {
+      // Store its ID for later deletion and remove the reference from the line
+      // item reference field.
+      $line_item_ids[] = $line_item_wrapper->line_item_id->value();
+      $order_wrapper->commerce_line_items->offsetUnset($delta);
+    }
+  }
+
+  // If we found any tax_service line items.
+  if (!empty($line_item_ids)) {
+    // Then delete the line items.
+    commerce_line_item_delete_multiple($line_item_ids);
+  }
+}
+
+function commerce_tax_services_address_from_tax_profile($order_wrapper) {
+  // Get taxable address.
+  $tax_address_profile = variable_get('commerce_tax_services_tax_address', 'Shipping');
+
+  $address_type = 'commerce_customer_' . strtolower($tax_address_profile);
+
+  if (!isset($order_wrapper->{$address_type}->commerce_customer_address)) {
+    return FALSE;
+  }
+
+  return $order_wrapper->{$address_type}->commerce_customer_address->value();
+}
+
+/**
+ * tax_service: returns the sales tax amount as an array.
+ *
+ * @param object $order
+ *   The order object to calculate the TaxJar line items for.
+ * @param bool $commit
+ *   Should we also commit the transaction.
+ *
+ * @return array
+ *   The TaxJar sales tax values as an array.
+ */
+function commerce_tax_services_retrieve_sales_tax($order, $commit = FALSE) {
+  // Build order wrapper.
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+  // Exit if there are no line items in the order wrapper.
+  if (count($order_wrapper->commerce_line_items) == 0) {
+    drupal_set_message(t('There are no line items for this order.'), 'error');
+
+    return FALSE;
+  }
+
+  $doc_code_prefix = 'dc';
+
+  $address = commerce_tax_services_address_from_tax_profile($order_wrapper);
+
+  $street1 = $address['thoroughfare'];
+  $street2 = $address['premise'];
+  $city = $address['locality'];
+  $state = $address['administrative_area'];
+  $country = $address['country'];
+  $zip = $address['postal_code'];
+
+  // Get primary business location.
+  $primary_street1 = (variable_get('commerce_tax_services_primary_street1', ''));
+  $primary_street2 = (variable_get('commerce_tax_services_primary_street2', ''));
+  $primary_city = (variable_get('commerce_tax_services_primary_city', ''));
+  $primary_state = (variable_get('commerce_tax_services_primary_state', ''));
+  $primary_country = (variable_get('commerce_tax_services_primary_country', ''));
+  $primary_zip = (variable_get('commerce_tax_services_primary_zip', ''));
+
+  $user_id = commerce_tax_services_get_user_id($order);
+
+  $doc_date = REQUEST_TIME;
+
+  if ($commit) {
+    foreach ($order_wrapper->commerce_line_items as $line_item_wrapper) {
+      if ($line_item_wrapper->type->value() == 'tax_service') {
+        // Store its ID for later deletion and remove the reference from the line item reference field.
+        $doc_date = $line_item_wrapper->created->value();
+
+        break;
+      }
+    }
+  }
+
+  // Get currency code from the order.
+  $tax_service_total = $order_wrapper->commerce_order_total->value();
+  $currency_code = $tax_service_total['currency_code'];
+
+  $variables = compact('commit', 'doc_code_prefix', 'doc_date', 'user_id',
+    'currency_code', 'street1', 'street2', 'city', 'state', 'country', 'zip',
+    'primary_street1', 'primary_street2', 'primary_city', 'primary_state',
+    'primary_country', 'primary_zip');
+
+  $sales_tax = FALSE;
+
+  $service_info = commerce_tax_services_service_info();
+
+  if (!empty($service_info['module'])) {
+    $hook = 'tax_service_calculate';
+
+    if (module_hook($service_info['module'], $hook)) {
+      $sales_tax = module_invoke($service_info['module'], $hook, $order, $variables);
+    }
+  }
+
+  // Check that there was a return from the tax request.
+  if (empty($sales_tax)) {
+    $name = (!empty($service_info['name'])) ? $service_info['name'] : 'Tax Service';
+
+    drupal_set_message(t($name . " did not calculate sales tax."), 'error');
+  }
+
+  return $sales_tax;
+}
+
+function commerce_tax_services_get_user_id($order) {
+  // Get User name or e-mail address.
+  if ($order->uid == 0) {
+    if ($order->order_id != 0 && $order->mail == '') {
+      $user_id = 'administrator';
+    } else {
+      $user_email = $order->mail;
+      $user_id = commerce_tax_services_email_to_username($user_email);
+    }
+  } else {
+    $user_data = user_load($order->uid);
+    $user_id = $user_data->name;
+  }
+
+  return $user_id;
+}
+
+/**
+ * Generate Tax service user name as approximation of e-mail address.
+ * @param $user_email
+ * @return mixed|string
+ */
+function commerce_tax_services_email_to_username($user_email) {
+  // Default to the first part of the e-mail address.
+  $name = substr($user_email, 0, strpos($user_email, '@'));
+
+  // Remove possible illegal characters.
+  $name = preg_replace('/[^A-Za-z0-9_.-]/', '', $name);
+
+  // Trim that value for spaces and length.
+  $name = trim(substr($name, 0, USERNAME_MAX_LENGTH - 4));
+
+  return $name;
+}
+
+function commerce_tax_services_query_params($url, $data = array()) {
+  $query_string = '';
+
+  if (is_array($data)) {
+    $query_string = str_replace("amp;", "", http_build_query($data));
+  }
+
+  $url .= (strpos($url, '?')) ? '&' : '?';
+  $url .= $query_string;
+
+  return $url;
+}
+
+function commerce_tax_services_curl_request($url, $method = 'get', $data = array(), $auth_username = '', $auth_password = '') {
+  $curl_opts = commerce_tax_services_curl_opts($method, $data, $auth_username, $auth_password);
+
+  if ($method == 'get' && !empty($data)) {
+    $url = commerce_tax_services_query_params($url, $data);
+  }
+
+  $curl = curl_init($url);
+
+  foreach ($curl_opts as $opt => $val) {
+    curl_setopt($curl, $opt, $val);
+  }
+
+  $body = curl_exec($curl);
+
+  $result = array(
+    'body' => '',
+    'meta' => curl_getinfo($curl),
+  );
+
+  curl_close($curl);
+
+  if ($body === FALSE) {
+    watchdog('commerce_tax_services', 'TaxJar request failed. message: %msg', array('%msg' => curl_error($curl)), WATCHDOG_ERROR);
+
+    return $result;
+  }
+
+  if (COMMERCE_TAX_SERVICES_DEBUG) {
+    watchdog('commerce_tax_services', 'Request info: !url !headers !response !meta', array(
+      '!url' => "<pre>URL : $url</pre>",
+      '!headers' => "<pre>Request Headers:\n" . var_export($curl_opts[CURLOPT_HTTPHEADER], TRUE) . '</pre>',
+      '!response' => "<pre>Response:\n" . check_plain(var_export($body, TRUE)) . '</pre>',
+      '!meta' => "<pre>Response Meta:\n" . var_export($result['meta'], TRUE) . '</pre>',
+    ), WATCHDOG_DEBUG);
+  }
+
+  $result['body'] = ($body) ? json_decode($body, TRUE) : '';
+
+  return $result;
+}
+
+function commerce_tax_services_curl_opts($method = 'get', $data = array(), $auth_username = '', $auth_password = '') {
+  $curl_opts = array(
+    CURLOPT_RETURNTRANSFER => TRUE,
+    CURLOPT_FOLLOWLOCATION => FALSE,
+    CURLOPT_MAXREDIRS => 10,
+    CURLOPT_CONNECTTIMEOUT => 10,
+    CURLOPT_SSL_VERIFYPEER => TRUE,
+  );
+
+  if ($method == 'post') {
+    $data = json_encode($data);
+
+    $curl_opts[CURLOPT_POSTFIELDS] = $data;
+  }
+
+  $method = strtoupper($method);
+
+  if ($method != 'GET') {
+    $curl_opts[CURLOPT_CUSTOMREQUEST] = $method;
+  }
+
+  $curl_opts[CURLOPT_HTTPHEADER] = array(
+    'Content-Type: text/json',
+    'Date: ' . date(DATE_RFC1123, REQUEST_TIME),
+  );
+
+  if (!empty($auth_username)) {
+    $curl_opts[CURLOPT_HTTPHEADER][] = 'Authorization: Basic ' . base64_encode("$auth_username:$auth_password");
+  }
+
+  if ($method == 'post') {
+    $curl_opts[CURLOPT_HTTPHEADER][] = 'Content-Length: ' . strlen($data);
+  }
+
+  $service_info = commerce_tax_services_service_info();
+  if (!empty($service_info['module'])) {
+    $hook = 'tax_service_curl_opts';
+
+    if (module_hook($service_info['module'], $hook)) {
+      module_invoke($service_info['module'], $hook, $curl_opts);
+    }
+  }
+
+  return $curl_opts;
+}
+
+/**
+ * Sends HTTP GET request to endpoint.
+ *
+ * @param $endpoint
+ * @param $parameters
+ * @param string $base_url
+ * @param string $auth_username
+ * @param string $auth_password
+ * @return array Returns an associative array containing 'meta' and 'body' elements.
+ * Returns an associative array containing 'meta' and 'body' elements.
+ */
+function commerce_tax_services_get($endpoint, $parameters, $base_url = '', $auth_username = '', $auth_password = '') {
+  $config = commerce_tax_services_get_config($auth_username, $auth_password, $base_url);
+
+  $url = rtrim($config['base_url'], '/') . '/' . ltrim($endpoint, '/');
+
+  return commerce_tax_services_curl_request($url, 'get', $parameters, $config['auth_username'], $config['auth_password']);
+}
+
+/**
+ * Sends HTTP POST request to endpoint.
+ *
+ * @param $endpoint
+ * @param $data
+ * @param string $base_url
+ * @param string $auth_username
+ * @param string $auth_password
+ * @return array Returns an associative array containing 'meta' and 'body' elements.
+ * Returns an associative array containing 'meta' and 'body' elements.
+ */
+function commerce_tax_services_post($endpoint, $data, $base_url = '', $auth_username = '', $auth_password = '') {
+  $config = commerce_tax_services_get_config($auth_username, $auth_password, $base_url);
+
+  $url = rtrim($config['base_url'], '/') . '/' . ltrim($endpoint, '/');
+
+  return commerce_tax_services_curl_request($url, 'post', $data, $config['auth_username'], $config['auth_password']);
+}
+
+function commerce_tax_services_taxable_address(&$form, &$form_state) {
+  $taxable_address = 'customer_profile_shipping';
+
+  if ((isset($form_state['values']['customer_profile_shipping']['commerce_customer_profile_copy'])
+      && $form_state['values']['customer_profile_shipping']['commerce_customer_profile_copy'])
+    || (isset($form['customer_profile_shipping']['commerce_customer_profile_copy']['#default_value'])
+      && $form['customer_profile_shipping']['commerce_customer_profile_copy']['#default_value'])) {
+    $taxable_address = 'customer_profile_billing';
+  }
+
+  return $taxable_address;
+}
+
+function commerce_tax_services_form_commerce_checkout_form_checkout_alter(&$form, &$form_state, $form_id) {
+  if (!variable_get('commerce_tax_services_validate_address', FALSE)) {
+    return;
+  }
+
+  $form['#attributes']['class'][] = 'commerce_checkout_form';
+
+  $form['buttons']['validate'] = array(
+    '#type' => 'submit',
+    '#value' => t('Validate'),
+    '#attributes' => array(
+      'class' => array('address-validate-btn'),
+    ),
+    '#ajax' => array(
+      'wrapper' => 'address_validation_wrapper',
+      'callback' => 'commerce_tax_services_validate_shipping_address_ajax_callback',
+      'progress' => array('type' => 'none'),
+    ),
+  );
+
+  $form['address_validation_result'] = array(
+    '#type' => 'container',
+    '#prefix' => '<div id="address_validation_wrapper">',
+    '#suffix' => '</div>',
+  );
+
+  $taxable_address = commerce_tax_services_taxable_address($form, $form_state);
+
+  drupal_add_js(array('commerce_tax_services' => array('commerce_tax_services_address_validation_profile' => $taxable_address)), 'setting');
+
+  $countries = (array) variable_get('commerce_tax_services_address_validate_countries', array('US'));
+
+  if (isset($form_state['values'][$taxable_address]['commerce_customer_address'][LANGUAGE_NONE][0])) {
+    $address_value = $form_state['values'][$taxable_address]['commerce_customer_address'][LANGUAGE_NONE][0];
+
+    $city = $address_value['locality'];
+    $state = $address_value['administrative_area'];
+    $country = $address_value['country'];
+    $postal_code = $address_value['postal_code'];
+    $line1 = $address_value['thoroughfare'];
+    $line2 = isset($address_value['premise']) ? $address_value['premise'] : '';
+
+    if (!in_array($country, $countries)) {
+      return;
+    }
+
+    $args = compact('line1', 'line2', 'city', 'state', 'country', 'postal_code');
+    $validated_address = commerce_tax_services_validate_address($args);
+    if ($validated_address === NULL) {
+      return;
+    }
+
+    $res = commerce_tax_services_address_compare($args, $validated_address);
+
+    $form_state['address_validation_result'] = $res;
+  }
+
+  $validate_countries_client_side = (!isset($form[$taxable_address]['commerce_customer_address'][LANGUAGE_NONE][0]['country']['#access']) ||
+    $form[$taxable_address]['commerce_customer_address'][LANGUAGE_NONE][0]['country']['#access'] != FALSE);
+
+  drupal_add_library('system', 'ui.dialog');
+
+  drupal_add_js(array(
+    'commerce_tax_services' => array(
+      'commerce_tax_services_autocomplete_postal_code' => variable_get('commerce_tax_services_autocomplete_postal_code', TRUE),
+      'commerce_tax_services_address_validate_countries' => $countries,
+      'commerce_tax_services_address_do_country_validate' => $validate_countries_client_side,
+    ),
+  ), 'setting');
+
+  drupal_add_js(drupal_get_path('module', 'commerce_tax_services') . '/js/address_validate.js');
+  drupal_add_css(drupal_get_path('module', 'commerce_tax_services') . '/theme/commerce_tax_services_checkout.css');
+
+  $form['buttons']['validate']['#validate'][] = 'commerce_tax_services_checkout_validate';
+}
+
+function commerce_tax_services_get_address_from_profile($profile) {
+  return (isset($profile->commerce_customer_address[LANGUAGE_NONE][0]))
+    ? $profile->commerce_customer_address[LANGUAGE_NONE][0] : array();
+}
+
+function commerce_tax_services_has_line_items($order) {
+  if ($order->order_id) {
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+    if (count($order_wrapper->commerce_line_items) > 0) {
+      return TRUE;
+    }
+  }
+
+  return FALSE;
+}
+
+function commerce_tax_services_has_tax_service_items($order) {
+  if ($order->order_id) {
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+    foreach ($order_wrapper->commerce_line_items as $delta => $line_item_wrapper) {
+      if ($line_item_wrapper->type->value() == 'tax_service') {
+        return TRUE;
+      }
+    }
+  }
+
+  return FALSE;
+}
+
+function commerce_tax_services_form_state_var() {
+  $tax_address_profile = variable_get('commerce_tax_services_tax_address', 'Shipping');
+
+  $form_state_var = 'commerce_customer_' . strtolower($tax_address_profile);
+
+  return $form_state_var;
+}
+
+function commerce_tax_services_is_complete_address($profile, $address, &$form_state, $form_state_var) {
+  $is_complete_address = FALSE;
+
+  if (isset($profile->profile_id)) {
+    if ($address['postal_code'] && $address['country'] && $address['locality'] && $address['administrative_area'] && $address['thoroughfare']) {
+      $is_complete_address = TRUE;
+    }
+  } else {
+    if (isset($form_state['input'][$form_state_var][LANGUAGE_NONE]['profiles'][0]['commerce_customer_address'][LANGUAGE_NONE][0])) {
+      $address = $form_state['input'][$form_state_var][LANGUAGE_NONE]['profiles'][0]['commerce_customer_address'][LANGUAGE_NONE][0];
+      if ($address['postal_code'] && $address['country'] && $address['locality'] && $address['administrative_area'] && $address['thoroughfare']) {
+        $is_complete_address = TRUE;
+      }
+    }
+  }
+
+  return $is_complete_address;
+}
+
+function commerce_tax_services_check_profile_address($address, $profile, &$form_state, $form_state_var) {
+  if (isset($profile->profile_id)) {
+    return $address;
+  } elseif (isset($form_state['input'][$form_state_var][LANGUAGE_NONE]['profiles'][0]['commerce_customer_address'][LANGUAGE_NONE][0])) {
+    return $form_state['input'][$form_state_var][LANGUAGE_NONE]['profiles'][0]['commerce_customer_address'][LANGUAGE_NONE][0];
+  }
+
+  return false;
+}
+
+function commerce_tax_services_is_selected_state($address) {
+  $states = variable_get('commerce_tax_services_select_states', array());
+
+  $is_selected_state = $address
+    ? (!empty($states)) ? (in_array($address['administrative_area'], $states)) : TRUE
+    : FALSE;
+
+  return $is_selected_state;
+}
+
+function commerce_tax_services_is_tax_service_actions_line_item_type(&$form_state) {
+  return (isset($form_state['input']['commerce_line_items'][LANGUAGE_NONE]['actions']['line_item_type'])
+    && $form_state['input']['commerce_line_items'][LANGUAGE_NONE]['actions']['line_item_type'] == 'tax_service');
+}
+
+/**
+ * Implements hook_form_alter().
+ * @param $form
+ * @param $form_state
+ * @param $form_id
+ */
+function commerce_tax_services_form_commerce_order_ui_order_form_alter(&$form, &$form_state, $form_id) {
+  $order = $form['#entity'];
+  $form_state_var = commerce_tax_services_form_state_var();
+  $address = commerce_tax_services_get_address_from_profile($form);
+  $profile = $form[$form_state_var][LANGUAGE_NONE]['profiles'][0]['profile']['#value'];
+
+  $has_line_items = commerce_tax_services_has_line_items($order);
+  $has_tax_service_items = ($has_line_items) ? commerce_tax_services_has_tax_service_items($order) : FALSE;
+  $has_new_line_items = (isset($form_state['line_item_save_warning']));
+  $is_complete_address = commerce_tax_services_is_complete_address($profile, $address, $form_state, $form_state_var);
+
+  $address = commerce_tax_services_check_profile_address($address, $profile, $form_state, $form_state_var);
+  $is_selected_state = commerce_tax_services_is_selected_state($address);
+
+  if (!$order->order_id || !$has_line_items || $has_new_line_items || $has_tax_service_items || !$is_complete_address || !$is_selected_state) {
+    $form['commerce_line_items'][LANGUAGE_NONE]['actions']['line_item_type']['#ajax'] = array(
+      'wrapper' => 'line-item-manager',
+      'callback' => 'commerce_tax_services_line_item_add_btn',
+    );
+
+    $form['commerce_line_items'][LANGUAGE_NONE]['actions']['line_item_add']['#prefix'] = '<div id="line_item_add_btn">';
+    $form['commerce_line_items'][LANGUAGE_NONE]['actions']['line_item_add']['#suffix'] = '</div>';
+
+    $is_tax_service_actions_type = commerce_tax_services_is_tax_service_actions_line_item_type($form_state);
+
+    if ($is_tax_service_actions_type) {
+      if (!$order->order_id) {
+        drupal_set_message(t('Please save this order to allocate an order # and then calculate sales tax.'), 'warning');
+      } elseif (!$has_line_items) {
+        drupal_set_message(t('You can not calculate sales tax on an order with no line items.'), 'warning');
+      } elseif ($has_tax_service_items) {
+        drupal_set_message(t('An order may not have two sales tax lines.'), 'warning');
+      } elseif ($has_new_line_items) {
+        drupal_set_message(t('Please save the order before calculating sales tax.'), 'warning');
+      } elseif (!$is_complete_address) {
+        drupal_set_message(t('Please save a complete taxable address before calculating sales tax.'), 'warning');
+      } else {
+        drupal_set_message(t('State - @state - is not configured for sales tax calculations. Please correct address and save the order.', array(
+          '@state' => $address['administrative_area'])), 'warning');
+      }
+    }
+
+    $form['commerce_line_items'][LANGUAGE_NONE]['actions']['line_item_add']['#disabled'] = $is_tax_service_actions_type;
+  }
+
+  // Disable save line item if no sales tax calculated.
+  if (isset($form['commerce_line_items'][LANGUAGE_NONE]['actions']['tax_service_error'])) {
+    $form['commerce_line_items'][LANGUAGE_NONE]['actions']['save_line_item']['#disabled'] = TRUE;
+  }
+}
+
+/**
+ * Ajax callback for commerce order form.
+ * @param $form
+ * @param $form_state
+ * @return mixed
+ */
+function commerce_tax_services_line_item_add_btn($form, &$form_state) {
+  return $form['commerce_line_items'];
+}
+
+/**
+ * Checkout form validation callback to rebuild the form on AJAX calls.
+ * @param $form
+ * @param $form_state
+ */
+function commerce_tax_services_checkout_validate($form, &$form_state) {
+  $form_state['rebuild'] = TRUE;
+}
+
+/**
+ * Custom Ajax callback for setting up address validation popup.
+ * @param $form
+ * @param $form_state
+ * @return array
+ */
+function commerce_tax_services_validate_shipping_address_ajax_callback($form, &$form_state) {
+  $commands = array();
+
+  $commands[] = array(
+    'command' => 'afterAddressValidation',
+    'validation_result' => isset($form_state['address_validation_result']) ? $form_state['address_validation_result'] : FALSE,
+    'errors' => form_get_errors(),
+  );
+
+  return array(
+    '#type' => 'ajax',
+    '#commands' => $commands
+  );
+}
+
+/**
+ * Validate the shipping address entered on checkout form.
+ * @param $address
+ * @return mixed
+ */
+function commerce_tax_services_validate_address($address) {
+  $service_info = commerce_tax_services_service_info();
+
+  if (!empty($service_info['module'])) {
+    $hook = 'tax_service_validate_address';
+
+    if (module_hook($service_info['module'], $hook)) {
+      $address = module_invoke($service_info['module'], $hook);
+    }
+  }
+
+  return $address;
+}
+
+function commerce_tax_services_compare_postal_codes($validated_address, $original) {
+  $post_code_full_validation = variable_get('commerce_tax_services_address_postal_code', TRUE);
+  $autocomplete_post_code = variable_get('commerce_tax_services_autocomplete_postal_code', TRUE);
+
+  $validated_postal_code = $validated_address['postal_code'];
+  $original_postal_code = $original['postal_code'];
+
+  if (!$post_code_full_validation || $autocomplete_post_code) {
+    $validated_postal_code = substr($validated_postal_code, 0, 5);
+    $original_postal_code = substr($original_postal_code, 0, 5);
+  }
+
+  return $validated_postal_code == $original_postal_code;
+}
+
+/**
+ * Compare entered address and the address returned from the tax service.
+ * @param $original
+ * @param $validated_address
+ * @return array
+ * @throws \Exception
+ */
+function commerce_tax_services_address_compare($original, $validated_address) {
+  $result = array(
+    'result' => '', // valid/needs correction/invalid
+    'msg' => '',
+    'suggestions' => array(),
+  );
+
+  if (!$validated_address) {
+    $result['result'] = 'invalid';
+    $result['msg'] = '<p>' . t('We could not validate the shipping address entered. Please check that you have entered the correct address.') . '</p>';
+    $result['msg'] .= '<p>' . t('Entered address is:') . '</p>' . theme('commerce_tax_services_address', array('address' => $original));
+
+    return $result;
+  }
+
+  $result['result'] = 'valid'; // Assume valid unless one of the below checks fails
+  $result['suggestions'] = array($validated_address);
+
+  foreach (array('line1', 'line2', 'city', 'state', 'country', 'postal_code') as $key) {
+    if (isset($original[$key]) && (!isset($validated_address[$key]) || $validated_address[$key] != $original[$key])) {
+      $result['result'] = 'needs correction';
+      $result['msg'] = drupal_render(drupal_get_form('commerce_tax_services_address_suggestion_form', $original, array($validated_address)));
+
+      break;
+    }
+  }
+
+  return $result;
+}
+
+/**
+ * Implements hook_theme().
+ */
+function commerce_tax_services_theme() {
+  return array(
+    'commerce_tax_services_address' => array(
+      'variables' => array(
+        'address' => array(),
+      ),
+    ),
+  );
+}
+
+/**
+ * Format address array to be used in the address suggestion form.
+ * @param $variables
+ * @return string
+ */
+function theme_commerce_tax_services_address($variables) {
+  $template = "%s<br/>\n%s, %s %s<br/>\n%s";
+
+  $address = $variables['address'];
+
+  $street = $address['line1'];
+
+  if ($address['line2']) {
+    $street .= "<br/>\n{$address['line2']}";
+  }
+
+  return sprintf($template, $street, $address['city'], $address['state'], $address['postal_code'], $address['country']);
+}
+
+function commerce_tax_services_suggestion_options($suggestions) {
+  $options = array();
+
+  foreach ($suggestions as $address) {
+    $options[] = theme('commerce_tax_services_address', array(
+      'address' => $address,
+    ));
+  }
+
+  return $options;
+}
+
+/**
+ * Returns address suggestion form.
+ * @param $form
+ * @param $form_state
+ * @param $original_address
+ * @param $suggestions
+ * @return mixed
+ * @throws \Exception
+ */
+function commerce_tax_services_address_suggestion_form($form, &$form_state, $original_address, $suggestions) {
+  $message_template = 'Your shipping address is different from the post office records. We suggest you accept %s to avoid shipping delays.';
+  $message = sprintf($message_template, count($suggestions) == 1 ? 'the recommended address' : 'one of the recommended addresses');
+
+  $form['info'] = array(
+    '#type' => 'markup',
+    '#markup' => '<p>' . t($message) . '</p>',
+  );
+
+  $form['original_address'] = array(
+    '#type' => 'markup',
+    '#markup' => '<p>' . t('Entered address is:') . '</p>' . theme('commerce_tax_services_address', array('address' => $original_address)),
+  );
+
+  $form['addresses'] = array(
+    '#title' => t('Recommended address'),
+    '#type' => 'radios',
+    '#options' => commerce_tax_services_suggestion_options($suggestions),
+    '#default_value' => '0',
+  );
+
+  return $form;
+}
+
+/**
+ * Returns tax_service request configurations.
+ * @param string $auth_username
+ * @param string $auth_password
+ * @param string $base_url
+ * @return array
+ */
+function commerce_tax_services_get_config($auth_username = '', $auth_password = '', $base_url = '') {
+  $config = array(
+    'base_url' => $base_url,
+    'auth_username' => $auth_username,
+    'auth_password' => $auth_password,
+  );
+
+  $service_info = commerce_tax_services_service_info();
+
+  if (!empty($service_info['module'])) {
+    $hook = 'tax_service_config';
+
+    if (module_hook($service_info['module'], $hook)) {
+      module_invoke($service_info['module'], $hook, $config);
+    }
+  }
+
+  return $config;
+}
+
+/**
+ * Is tax_service service to be used for this transaction.
+ * @param $order
+ * @return bool
+ */
+function commerce_tax_services_check_address($order) {
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+  $address = commerce_tax_services_address_from_tax_profile($order_wrapper);
+
+  $state = $address['administrative_area'];
+
+  $states = (array) variable_get('commerce_tax_services_select_states', array());
+
+  return empty($states) || in_array($state, $states);
+}
+
+function commerce_tax_services_cancel_transaction($order) {
+  $service_info = commerce_tax_services_service_info();
+
+  if (!empty($service_info['module'])) {
+    $hook = 'tax_service_cancel_transaction';
+
+    if (module_hook($service_info['module'], $hook)) {
+      module_invoke($service_info['module'], $hook, $order);
+    }
+  }
+}
+
+function commerce_tax_services_states() {
+  $states = array(
+    'AL' => t('Alabama'),
+    'AK' => t('Alaska'),
+    'AZ' => t('Arizona'),
+    'AR' => t('Arkansas'),
+    'CA' => t('California'),
+    'CO' => t('Colorado'),
+    'CT' => t('Connecticut'),
+    'DE' => t('Delaware'),
+    'DC' => t('District Of Columbia'),
+    'FL' => t('Florida'),
+    'GA' => t('Georgia'),
+    'HI' => t('Hawaii'),
+    'ID' => t('Idaho'),
+    'IL' => t('Illinois'),
+    'IN' => t('Indiana'),
+    'IA' => t('Iowa'),
+    'KS' => t('Kansas'),
+    'KY' => t('Kentucky'),
+    'LA' => t('Louisiana'),
+    'ME' => t('Maine'),
+    'MD' => t('Maryland'),
+    'MA' => t('Massachusetts'),
+    'MI' => t('Michigan'),
+    'MN' => t('Minnesota'),
+    'MS' => t('Mississippi'),
+    'MO' => t('Missouri'),
+    'MT' => t('Montana'),
+    'NE' => t('Nebraska'),
+    'NV' => t('Nevada'),
+    'NH' => t('New Hampshire'),
+    'NJ' => t('New Jersey'),
+    'NM' => t('New Mexico'),
+    'NY' => t('New York'),
+    'NC' => t('North Carolina'),
+    'ND' => t('North Dakota'),
+    'OH' => t('Ohio'),
+    'OK' => t('Oklahoma'),
+    'OR' => t('Oregon'),
+    'PA' => t('Pennsylvania'),
+    'RI' => t('Rhode Island'),
+    'SC' => t('South Carolina'),
+    'SD' => t('South Dakota'),
+    'TN' => t('Tennessee'),
+    'TX' => t('Texas'),
+    'UT' => t('Utah'),
+    'VT' => t('Vermont'),
+    'VA' => t('Virginia'),
+    'WA' => t('Washington'),
+    'WV' => t('West Virginia'),
+    'WI' => t('Wisconsin'),
+    'WY' => t('Wyoming'),
+    'AA' => t('Armed Forces (Americas)'),
+    'AE' => t('Armed Forces (Europe, Canada, Middle East, Africa)'),
+    'AP' => t('Armed Forces (Pacific)'),
+    'AS' => t('American Samoa'),
+    'FM' => t('Federated States of Micronesia'),
+    'GU' => t('Guam'),
+    'MH' => t('Marshall Islands'),
+    'MP' => t('Northern Mariana Islands'),
+    'PW' => t('Palau'),
+    'PR' => t('Puerto Rico'),
+    'VI' => t('Virgin Islands'),
+  );
+
+  drupal_alter('tax_service_states', $states);
+
+  return $states;
+}
+
+function commerce_tax_services_address_options() {
+  $address_options = array(
+    'Billing' => t('Billing'),
+  );
+
+  if (module_exists('commerce_shipping')) {
+    $address_options['Shipping'] = t('Shipping');
+  }
+
+  $address_options += module_invoke_all('tax_service_address_options');
+
+  drupal_alter('tax_service_address_options', $address_options);
+
+  return $address_options;
+}

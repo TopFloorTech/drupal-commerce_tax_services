@@ -1,0 +1,16 @@
+/**
+ * Admin styles for Commerce AvaTax.
+ */
+
+.commerce-tax-services-rate {
+  margin-bottom: 2em;
+}
+
+.commerce-tax-services-rate.form-item {
+  display: inline;
+  margin-right: 1em;
+}
+
+.links.operations {
+  text-transform: lowercase;
+}

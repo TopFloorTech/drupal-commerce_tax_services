@@ -1,0 +1,60 @@
+<?php
+
+/**
+ * @file
+ * Installation functions for Commerce AvaTax Connector.
+ */
+
+/**
+ * Implements hook_requirements().
+ */
+function commerce_tax_services_requirements($phase) {
+  $requirements = array();
+
+  // Ensure translations don't break at install time.
+  $t = get_t();
+
+  $has_curl = extension_loaded('curl');
+
+  $requirements['commerce_tax_services_curl'] = array(
+    'title' => $t('cURL'),
+    'value' => $has_curl ? $t('Enabled for Commerce Tax Services') : $t('Not found'),
+  );
+
+  if (!$has_curl) {
+    $requirements['commerce_tax_services_curl']['severity'] = REQUIREMENT_ERROR;
+    $requirements['commerce_tax_services_curl']['description'] = $t('Commerce Tax Services requires PHP cURL extension to be enabled and configured on your server.');
+  }
+
+  return $requirements;
+}
+
+/**
+ * Implements hook_install().
+ */
+function commerce_tax_services_install() {
+  variable_set('commerce_tax_services_install_time', microtime(TRUE));
+
+  if (module_exists('commerce_tax')) {
+    $t = get_t();
+
+    drupal_set_message($t('Commerce Tax Services may conflict with the commerce_tax module.'), 'warning');
+  }
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function commerce_tax_services_uninstall() {
+  db_delete('variable')->condition('name', "commerce_tax_services_%", "LIKE")->execute();
+
+  cache_clear_all('variables', 'cache');
+
+  $rules = rules_config_load_multiple(FALSE);
+
+  foreach ($rules as $rule) {
+    if (strpos($rule->name, 'commerce_tax_services') === 0) {
+      rules_config_delete(array($rule->id));
+    }
+  }
+}

@@ -1,0 +1,9 @@
+name = Commerce Tax Services UI
+description = Provides a UI for configuring Commerce Tax Services
+package = Commerce (Tax Services)
+core = 7.x
+
+dependencies[] = commerce
+dependencies[] = commerce_tax_services
+
+configure = admin/commerce/config/tax-services

@@ -1,0 +1,9 @@
+name = Drupal Commerce Tax Services
+description = Drupal Commerce Connector for tax services
+package = Commerce (Tax Services)
+core = 7.x
+
+dependencies[] = commerce
+dependencies[] = commerce_line_item
+dependencies[] = list
+dependencies[] = rules

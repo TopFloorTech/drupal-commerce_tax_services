@@ -60,10 +60,7 @@ function commerce_tax_services_service_info($id = null) {
 }
 
 function commerce_tax_services_current_service_id() {
-  // TODO: Get current service ID from variable
-  $service_id = 'taxjar';
-
-  return $service_id;
+  return variable_get('commerce_tax_services_enabled_tax_service', '');
 }
 
 function commerce_tax_services_tax_service_name($service_id = null) {
@@ -600,6 +597,21 @@ function commerce_tax_services_retrieve_sales_tax($order, $commit = FALSE) {
   }
 
   return $sales_tax;
+}
+
+function commerce_tax_services_get_shipping_price($order) {
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+  // Loop over all the line items on the order.
+  foreach ($order_wrapper->commerce_line_items as $delta => $line_item_wrapper) {
+    // If the current line item is a shipping line item...
+    if ($line_item_wrapper->type->value() == 'shipping') {
+      // Return its label.
+      return $line_item_wrapper->commerce_total->amount->value();
+    }
+  }
+
+  return 0.00;
 }
 
 function commerce_tax_services_get_user_id($order) {

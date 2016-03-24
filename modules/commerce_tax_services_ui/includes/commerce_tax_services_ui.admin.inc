@@ -32,6 +32,20 @@ function commerce_tax_services_ui_admin_settings($form, &$form_state) {
   return system_settings_form($form);
 }
 
+function commerce_tax_services_ui_tax_service_select_options() {
+  $info = commerce_tax_services_info();
+
+  $options = array();
+
+  $options[''] = 'None (Disable tax calculation)';
+
+  foreach ($info as $service_id => $service_info) {
+    $options[$service_id] = $service_info['name'];
+  }
+
+  return $options;
+}
+
 function commerce_tax_services_ui_admin_services() {
   $services = array(
     '#type' => 'container',
@@ -41,6 +55,15 @@ function commerce_tax_services_ui_admin_services() {
   );
 
   $info = commerce_tax_services_info();
+
+  $services['commerce_tax_services_enabled_tax_service'] = array(
+    '#type' => 'select',
+    '#title' => t('Enabled Tax Service'),
+    '#description' => t('Select which tax service to enable'),
+    '#options' => commerce_tax_services_ui_tax_service_select_options(),
+    '#default_value' => variable_get('commerce_tax_services_enabled_tax_service', ''),
+  );
+
   $hook = 'tax_service_admin_options';
   foreach ($info as $service_id => $service_info) {
     if (!empty($service_info['module'])) {

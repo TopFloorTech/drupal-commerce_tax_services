@@ -1,0 +1,7 @@
+name = Avatax Tax Service
+description = Extends Commerce Tax Services providing support for Avalara Avatax (Experimental, do not enable)
+package = Commerce (Tax Services)
+core = 7.x
+
+dependencies[] = commerce
+dependencies[] = commerce_tax_services

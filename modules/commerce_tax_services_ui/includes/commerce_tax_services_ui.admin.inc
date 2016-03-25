@@ -251,20 +251,6 @@ function commerce_tax_services_ui_admin_address_validation_options(&$form, &$for
     '#default_value' => (array) variable_get('commerce_tax_services_address_validate_countries', array('US')),
     '#required' => TRUE,
   );
-
-  $options['address_validate']['config']['commerce_tax_services_address_postal_code'] = array(
-    '#type' => 'checkbox',
-    '#title' => t('Match on postal code'),
-    '#description' => t('Postal codes are 9 digits, but most people enter the first 5 digits, do you want AvaTax to match all 9 digits?'),
-    '#default_value' => variable_get('commerce_tax_services_address_postal_code', TRUE),
-  );
-
-  $options['address_validate']['config']['commerce_tax_services_autocomplete_postal_code'] = array(
-    '#type' => 'checkbox',
-    '#title' => t('Auto complete 5 digit postal code to 9 digits'),
-    '#description' => t('Automatically insert the 9 digit postal code provided by AvaTax'),
-    '#default_value' => variable_get('commerce_tax_services_autocomplete_postal_code', TRUE),
-  );
   
   return $options;
 }

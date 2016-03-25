@@ -53,10 +53,10 @@ function commerce_tax_services_default_rules_configuration() {
     'op' => '==',
     'value' => 'commerce-order:commerce-order-total:amount',
   ))->negate());
-  $rule->action(rules_action('commerce_tax_services_delete_tax_service_line_items', array(
+  $rule->action(rules_action('commerce_tax_services_rules_delete_tax_service_line_items', array(
     'order:select' => 'commerce-order',
   )));
-  $rules['commerce_tax_services_delete_tax_service_line_items'] = $rule;
+  $rules['commerce_tax_services_rules_delete_tax_service_line_items'] = $rule;
 
   return $rules;
 }
